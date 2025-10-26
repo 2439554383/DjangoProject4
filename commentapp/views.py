@@ -51,11 +51,19 @@ def strip_markdown(text):
 
 
 def fetch_image_b64(url):
-    resp = requests.get(url)
-    if resp.status_code == 200:
-        return base64.b64encode(resp.content).decode('utf-8')
-    print("fetch_image_b64: error status", resp.status_code)
-    return None
+    # 添加URL验证
+    if not url or url == 'None' or not isinstance(url, str):
+        print(f"fetch_image_b64: 无效的URL: {url}")
+        return None
+    try:
+        resp = requests.get(url, timeout=10)  # 添加10秒超时
+        if resp.status_code == 200:
+            return base64.b64encode(resp.content).decode('utf-8')
+        print(f"fetch_image_b64: error status {resp.status_code}")
+        return None
+    except Exception as exc:
+        print(f"fetch_image_b64: 请求失败: {exc}")
+        return None
 
 
 def encode_image_b64(image_path):
@@ -82,10 +90,11 @@ def compress_image_to_b64(file, max_size_kb=1024):
 
 def gen_image_text_stream(base64_image, text):
     try:
-        client = OpenAI(api_key="sk-ebbcpdkopzbtwmeyedlqepvdeppbbkpgllhqudjuolvirxru",
+        print(f"[AI] 开始调用VLM模型，图片大小: {len(base64_image) if base64_image else 0} bytes")
+        client = OpenAI(api_key="sk-hnrdyinxtiweniixaanaydjbofjwxacqbdmybgcpuqzuzznn",
                         base_url="https://api.siliconflow.cn/v1")
         response = client.chat.completions.create(
-            model="Qwen/Qwen2.5-VL-72B-Instruct",
+            model="Qwen/Qwen3-VL-32B-Instruct",
             messages=[
                 {
                     "role": "user",
@@ -100,10 +109,15 @@ def gen_image_text_stream(base64_image, text):
             ],
             temperature=0.3,
             stream=True,
+            max_tokens=1000,  # 限制生成长度避免卡顿
+            timeout=180  # 添加超时
         )
+        print("[AI] VLM模型调用成功")
         return response
     except Exception as exc:
-        print("gen_image_text_stream error:", exc)
+        print(f"[AI错误] VLM模型调用失败: {exc}")
+        import traceback
+        traceback.print_exc()
         return None
 
 
@@ -114,14 +128,29 @@ def sanitize_filename(name):
 def stream_chunks(response):
     full_reply = ""
     first = True
-    for chunk in response:
-        if chunk.choices[0].delta.content:
-            part = chunk.choices[0].delta.content
-            if first:
-                part = "（Ai生成）" + part
-                first = False
-            full_reply += part
-            yield part
+    chunk_count = 0
+    try:
+        print("[流式输出] 开始接收数据")
+        for chunk in response:
+            chunk_count += 1
+            if chunk_count == 1:
+                print("[流式输出] 第一个数据块到达")
+            if hasattr(chunk, 'choices') and len(chunk.choices) > 0 and hasattr(chunk.choices[0], 'delta'):
+                delta = chunk.choices[0].delta
+                if hasattr(delta, 'content') and delta.content:
+                    part = delta.content
+                    if first:
+                        part = "（Ai生成）" + part
+                        first = False
+                        print(f"[流式输出] 第一个文本内容: {part[:50]}...")
+                    full_reply += part
+                    yield part
+        print(f"[流式输出] 完成，共 {chunk_count} 个数据块，总长度: {len(full_reply)} 字符")
+    except Exception as exc:
+        print(f"[流式输出错误] {exc}")
+        import traceback
+        traceback.print_exc()
+        yield f"\n\n[错误: {str(exc)}]"
 
 
 def read_docx_text(file_path):
@@ -242,14 +271,38 @@ def docx_to_markdown_with_images_in_order(file_path):
 
 def transcribe_audio(tmp_audio):
     url = "https://api.siliconflow.cn/v1/audio/transcriptions"
-    token = "sk-ebbcpdkopzbtwmeyedlqepvdeppbbkpgllhqudjuolvirxru"
+    token = "sk-hnrdyinxtiweniixaanaydjbofjwxacqbdmybgcpuqzuzznn"
     headers = {"Authorization": f"Bearer {token}"}
     model = {"model": "FunAudioLLM/SenseVoiceSmall"}
-    with open(tmp_audio.name, "rb") as f:
-        files = {"file": (os.path.basename(tmp_audio.name), f, "audio/wav")}
-        resp = requests.post(url, headers=headers, data=model, files=files)
-        result = json.loads(resp.text)
-    return result.get('text', '')
+    
+    # 判断tmp_audio是文件对象还是路径字符串
+    if isinstance(tmp_audio, str):
+        audio_path = tmp_audio
+    else:
+        audio_path = tmp_audio.name
+    
+    print(f"[转录] 音频文件路径: {audio_path}")
+    print(f"[转录] 文件大小: {os.path.getsize(audio_path) if os.path.exists(audio_path) else '文件不存在'} bytes")
+    
+    try:
+        with open(audio_path, "rb") as f:
+            files = {"file": (os.path.basename(audio_path), f, "audio/wav")}
+            print(f"[转录] 开始上传音频到API...")
+            resp = requests.post(url, headers=headers, data=model, files=files, timeout=120)
+            
+            if resp.status_code != 200:
+                print(f"[转录错误] API返回状态码: {resp.status_code}")
+                return ""
+            
+            result = json.loads(resp.text)
+            text = result.get('text', '')
+            print(f"[转录完成] 提取的文本: {text[:100] if text else '空'}...")
+            return text
+    except Exception as exc:
+        print(f"[转录错误] 发生异常: {exc}")
+        import traceback
+        traceback.print_exc()
+        return ""
 
 
 def fetch_video_parse(video_url):
@@ -283,15 +336,26 @@ def fetch_video_parse(video_url):
 
 
 def gen_text_stream(text):
-    client = OpenAI(api_key="sk-ebbcpdkopzbtwmeyedlqepvdeppbbkpgllhqudjuolvirxru",
-                    base_url="https://api.siliconflow.cn/v1")
-    response = client.chat.completions.create(
-        model='deepseek-ai/DeepSeek-V2.5',
-        messages=[{'role': 'user', 'content': f"{text}"}],
-        stream=True,
-        temperature=0.3,
-    )
-    return response
+    try:
+        print(f"[AI] 开始调用纯文本模型: deepseek-ai/DeepSeek-V2.5")
+        print(f"[AI] 文本长度: {len(text)} 字符")
+        client = OpenAI(api_key="sk-hnrdyinxtiweniixaanaydjbofjwxacqbdmybgcpuqzuzznn",
+                        base_url="https://api.siliconflow.cn/v1")
+        response = client.chat.completions.create(
+            model='deepseek-ai/DeepSeek-V2.5',
+            messages=[{'role': 'user', 'content': f"{text}"}],
+            stream=True,
+            temperature=0.3,
+            max_tokens=1000,  # 限制生成长度
+            timeout=180  # 添加超时
+        )
+        print("[AI] 纯文本模型调用成功")
+        return response
+    except Exception as exc:
+        print(f"[AI错误] 纯文本模型调用失败: {exc}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 # =========================
@@ -402,33 +466,105 @@ def get_comment(request):  # 生成短视频评论
         print("fetch_video_parse error, fallback:", exc)  # 打印错误
         downloadable_url, cover_image_url, video_title = fallback_parse_api(video_url)  # 兜底解析
     if downloadable_url:  # 有可下载直链
+        tmp_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        audio_path = None
         try:
-            with tempfile.NamedTemporaryFile(suffix=".wav") as tmp_audio:  # 创建临时音频文件
-                cmd = [  # ffmpeg命令
-                    "ffmpeg", "-y", "-t", "30", "-i", downloadable_url,
-                    "-vn", "-ar", "16000", "-ac", "1", "-f", "wav", tmp_audio.name
-                ]
-                subprocess.run(cmd, check=True)  # 执行抽音频
-                audio_text = transcribe_audio(tmp_audio)  # 语音转文本
+            print("=" * 60)
+            print("步骤1: 提取音频")
+            print("=" * 60)
+            cmd = [  # ffmpeg命令
+                "ffmpeg", "-y", "-t", "30", "-i", downloadable_url,
+                "-vn", "-ar", "16000", "-ac", "1", "-f", "wav", tmp_audio.name
+            ]
+            subprocess.run(cmd, check=True)  # 执行抽音频
+            tmp_audio.flush()
+            audio_path = tmp_audio.name
+            tmp_audio.close()
+            
+            print("=" * 60)
+            print("步骤2: 音频转文本")
+            print("=" * 60)
+            audio_text = transcribe_audio(audio_path)  # 语音转文本
+            print(f"音频文本: {audio_text[:100] if audio_text else '空'}...")
+            
+            print("=" * 60)
+            print("步骤3: 构造提示词并获取封面图")
+            print("=" * 60)
             prompt = build_comment_prompt(audio_text, video_title, number, comment_type_labels)  # 构造提示词
-            base64_image = fetch_image_b64(cover_image_url)  # 获取封面Base64
-            response_data = gen_image_text_stream(base64_image, prompt)  # 图文多模态生成
-            if not response_data:  # 生成异常
-                return JsonResponse({"result": False}, status=500)  # 返回失败
-            return StreamingHttpResponse(stream_chunks(response_data), content_type='text/plain')  # 流式输出
+            
+            base64_image = None
+            if cover_image_url and cover_image_url != "None":
+                base64_image = fetch_image_b64(cover_image_url)  # 获取封面Base64
+                if base64_image:
+                    print(f"封面图获取成功，大小: {len(base64_image)} bytes")
+                else:
+                    print("封面图获取失败")
+            
+            print("=" * 60)
+            print("步骤4: 调用AI生成评论")
+            print("=" * 60)
+            
+            # 根据是否有封面图选择模型
+            if base64_image:
+                print("使用VLM图文模型")
+                response_data = gen_image_text_stream(base64_image, prompt)
+            else:
+                print("无封面图，使用纯文本模型")
+                # 修改提示词去掉图片相关内容
+                prompt_text = prompt.replace("视频封面图片和", "").replace("结合发送给你的", "")
+                response_data = gen_text_stream(prompt_text)
+            
+            if not response_data:
+                return JsonResponse({"result": False, "msg": "AI生成失败"}, status=500)
+            
+            print("=" * 60)
+            print("步骤5: 开始流式返回")
+            print("=" * 60)
+            return StreamingHttpResponse(stream_chunks(response_data), content_type='text/plain')
         except Exception as exc:
-            print(exc)  # 打印错误
-            return JsonResponse({"result": False}, status=500)  # 返回失败
+            print(f"处理失败: {exc}")
+            import traceback
+            traceback.print_exc()
+            return JsonResponse({"result": False, "msg": str(exc)}, status=500)
+        finally:
+            if audio_path and os.path.exists(audio_path):
+                try:
+                    os.unlink(audio_path)
+                except:
+                    pass
     else:  # 没有视频直链，仅用封面与标题生成
-        prompt = (  # 构造简化提示词
-            f"视频标题：{video_title};请结合发送给你的视频封面图片和视频的音频内容以及视频的标题模拟真人用{number}个字左右评论这个短视频，"
-            f"要求评论必须要符合{comment_type_labels} 这几个类型要求，但是评论内容尽量不出现{comment_type_labels}这几个字"
-        )
-        base64_image = fetch_image_b64(cover_image_url)  # 获取封面Base64
-        response_data = gen_image_text_stream(base64_image, prompt)  # 图文多模态生成
-        if not response_data:  # 异常
-            return JsonResponse({"result": False}, status=500)  # 返回失败
-        return StreamingHttpResponse(stream_chunks(response_data), status=200, content_type='text/plain')  # 流式输出
+        print("没有视频直链，仅用封面与标题生成评论")
+        try:
+            # 构造提示词
+            prompt = (  # 构造提示词
+                f"视频标题：{video_title};请结合视频标题模拟真人用{number}个字左右评论这个短视频，"
+                f"要求评论必须要符合{comment_type_labels} 这几个类型要求，但是评论内容尽量不出现{comment_type_labels}这几个字"
+            )
+            
+            # 获取封面图
+            base64_image = None
+            if cover_image_url and cover_image_url != "None":
+                base64_image = fetch_image_b64(cover_image_url)
+                if base64_image:
+                    print(f"封面图获取成功，大小: {len(base64_image)} bytes")
+            
+            # 根据是否有封面图选择模型
+            if base64_image:
+                print("使用VLM图文模型")
+                response_data = gen_image_text_stream(base64_image, prompt)
+            else:
+                print("无封面图，使用纯文本模型")
+                response_data = gen_text_stream(prompt)
+            
+            if not response_data:
+                return JsonResponse({"result": False, "msg": "AI生成失败"}, status=500)
+            
+            return StreamingHttpResponse(stream_chunks(response_data), content_type='text/plain')
+        except Exception as exc:
+            print(f"处理失败: {exc}")
+            import traceback
+            traceback.print_exc()
+            return JsonResponse({"result": False, "msg": str(exc)}, status=500)
 
 
 @csrf_exempt
@@ -624,7 +760,7 @@ def get_aiimage(request):
             "guidance_scale": 7.5,
         }
         headers = {
-            "Authorization": "Bearer sk-ebbcpdkopzbtwmeyedlqepvdeppbbkpgllhqudjuolvirxru",
+            "Authorization": "Bearer sk-hnrdyinxtiweniixaanaydjbofjwxacqbdmybgcpuqzuzznn",
             "Content-Type": "application/json"
         }
         resp = requests.request("POST", url, json=payload, headers=headers)
