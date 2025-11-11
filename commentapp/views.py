@@ -94,7 +94,7 @@ def gen_image_text_stream(base64_image, text):
         client = OpenAI(api_key="sk-hnrdyinxtiweniixaanaydjbofjwxacqbdmybgcpuqzuzznn",
                         base_url="https://api.siliconflow.cn/v1")
         response = client.chat.completions.create(
-            model="Qwen/Qwen3-VL-32B-Instruct",
+            model="Qwen/Qwen3-Omni-30B-A3B-Instruct",
             messages=[
                 {
                     "role": "user",
@@ -142,7 +142,7 @@ def stream_chunks(response):
                     if first:
                         part = "（Ai生成）" + part
                         first = False
-                        print(f"[流式输出] 第一个文本内容: {part[:50]}...")
+                    print(f"[流式输出]: {part}...")
                     full_reply += part
                     yield part
         print(f"[流式输出] 完成，共 {chunk_count} 个数据块，总长度: {len(full_reply)} 字符")
@@ -428,12 +428,120 @@ def download_audio_30s_ffmpeg(video_url):
         return tmp_audio
 
 
-def build_comment_prompt(audio_text, title, number, comment_type_labels):  # 组装评论提示词
-    return (  # 返回完整提示
-        f"视频音频内容：{audio_text};视频标题：{title};请结合发送给你的视频封面图片和视频的音频内容以及视频的标题"
-        f"模拟真人用{number}个字左右评论这个短视频，要求评论必须要符合{comment_type_labels} 这几个类型要求，"
-        f"但是评论内容尽量不出现{comment_type_labels}这几个字"
+COMMENT_PROMPT_TEMPLATES = {
+    "幽默": "以轻松诙谐的口吻描写，制造包袱或反转但保持友善，收尾要有记忆点。把幽默点落在视频核心内容上，控制在约{number}字。",
+    "干货": "给出1-2个具体观点或方法，突出实用价值，语言精练有逻辑，不空泛，保持约{number}字。",
+    "热词玩梗": "自然穿插当下热门梗或网络热词，但不要堆砌，保持与视频内容紧密相关，约{number}字。",
+    "散文诗歌": "用散文化诗意语言描绘观感，句式富有节奏感与画面感，情绪细腻饱满，控制在约{number}字左右。",
+    "咨询": "以真诚求教的语气提出1-2个精准问题，表现出对细节的关注和行动意愿，字数约{number}字。",
+    "感同身受": "表达强烈共鸣，引用音频或画面中的细节作为共情支撑，让读者感到真挚，约{number}字。",
+    "李白风格的唐诗": "创作一首仿李白风骨的七言古风诗，意象豪迈洒脱，可借酒、月、江山等意象，灵活分为约{lines}句，总字数接近{number}字。",
+    "点赞": "直接表达喜爱与赞赏，点明喜欢的原因或细节，语气热情真诚，约{number}字。",
+    "暖心鼓励": "用温暖有力量的话鼓励作者或主角，体现理解与支持，给出积极期待，字数约{number}字。",
+    "董宇辉式小作文": "采用真诚温暖、有画面感的文风，引用生活经验或文化典故，引导读者共鸣，层次分明，约{number}字。",
+    "宋词": "创作一首符合宋词婉约或豪放格调的小词，结构完整，词意连贯柔婉或豪迈，总字数贴近{number}字。",
+    "高情商": "保持尊重与体贴，以委婉方式表达观点或建议，兼顾对方面子和感受，约{number}字。",
+    "七言绝句": "写成约{lines}句的七言体诗，保持起承转合与平仄韵律，句句紧扣视频主题，总字数约{number}字。",
+    "神评论": "用一句或短段极具洞察力的话，巧妙点题或反转，引人点赞转发，约{number}字。",
+    "抒情七言绝句": "以细腻情感创作约{lines}句七言体诗，情绪层层递进，总字数约{number}字。",
+    "咏物诗七言绝句": "围绕视频中的关键事物写约{lines}句七言体诗，借物抒怀，总字数控制在{number}字左右。",
+    "叙事七言绝句": "用七言句式写成约{lines}句的小叙事诗，讲清事件脉络，总字数贴近{number}字。",
+    "讨论七言绝句": "在约{lines}句七言体诗中融入观点或疑问，引导互动，总字数约{number}字。",
+    "山水田园七言绝句": "描摹山水田园意境，写成约{lines}句七言体诗，借景抒情，总字数约{number}字。",
+    "边塞七言绝句": "以雄浑苍凉的语调创作约{lines}句七言体诗，展现边塞豪情，总字数约{number}字。",
+    "婉约七言绝句": "创作约{lines}句七言体诗，语调婉约柔美，情感内敛含蓄，总字数约{number}字。",
+    "豪放七言绝句": "用七言句式创作约{lines}句豪放之诗，节奏明快有力量，总字数约{number}字。",
+    "加油": "以热血积极的语气为作者或主角打气，可给出具体期待或目标，约{number}字。",
+    "支持": "明确表态支持，说明理由或未来行动，语气坚定友善，控制在{number}字左右。",
+    "同意": "先简洁复述对方观点亮点，再补充自己的认同理由或延伸思考，约{number}字。",
+    "羡慕": "表达由衷羡慕，点出最触动你的细节，并带出自己的想法或愿望，约{number}字。",
+    "向往": "描绘你对这种生活或体验的向往，结合标题与音频细节，展现期待与计划，约{number}字。",
+    "咨询类默认": "保持礼貌谦逊，提出一到两个核心问题，明确你想进一步了解的关键点，约{number}字。",
+    "默认": "以真实用户口吻结合视频细节和音频信息输出评论，语言自然顺畅，观点清晰，控制在{number}字左右。"
+}
+
+POETRY_STYLES_NEED_LINES = {
+    "李白风格的唐诗",
+    "七言绝句",
+    "抒情七言绝句",
+    "咏物诗七言绝句",
+    "叙事七言绝句",
+    "讨论七言绝句",
+    "山水田园七言绝句",
+    "边塞七言绝句",
+    "婉约七言绝句",
+    "豪放七言绝句",
+}
+
+
+def normalize_comment_type(raw_value):
+    if isinstance(raw_value, list):
+        return raw_value[0].strip() if raw_value else ""
+    if raw_value is None:
+        return ""
+    return str(raw_value).strip()
+
+
+def build_comment_prompt(audio_text, title, number, comment_type):
+    number = number or 50
+    comment_type = comment_type or ""
+    audio_text = audio_text.strip() if audio_text else ""
+    title = title.strip() if title else ""
+    safe_title = title or "未提供标题"
+    safe_audio = audio_text or "（音频内容为空或未识别）"
+    base_context = (
+        f"视频标题：《{safe_title}》。\n"
+        f"音频文本摘录：{safe_audio}。\n"
+        f"请基于以上标题与音频内容，创作约{number}字的短视频评论（允许上下浮动2-3个字）"
+        f"输出内容直接输出评论内容，而不是出现标题：或者评论：这种格式，直接给我评论内容"
     )
+    template = COMMENT_PROMPT_TEMPLATES.get(comment_type)
+    lines = 0
+    if comment_type in POETRY_STYLES_NEED_LINES:
+        try:
+            lines = max(4, round(int(number) / 7)) if number else 4
+        except (TypeError, ValueError):
+            lines = 4
+    if not template:
+        if comment_type:
+            if "咨询" in comment_type:
+                template = COMMENT_PROMPT_TEMPLATES.get("咨询类默认")
+                detail_instruction = template.format(
+                    number=number,
+                    title=safe_title,
+                    audio_text=safe_audio,
+                    lines=lines
+                )
+            else:
+                detail_instruction = (
+                    f"请以“{comment_type}”风格创作评论，语言自然流畅，突出该类型的典型特征，控制在约{number}字。"
+                )
+        else:
+            template = COMMENT_PROMPT_TEMPLATES.get("默认")
+            detail_instruction = template.format(
+                number=number,
+                title=safe_title,
+                audio_text=safe_audio,
+                lines=lines
+            )
+    else:
+        detail_instruction = template.format(
+            number=number,
+            title=safe_title,
+            audio_text=safe_audio,
+            lines=lines
+        )
+    if comment_type and (
+        comment_type in POETRY_STYLES_NEED_LINES
+        or any(keyword in comment_type for keyword in ["宋词", "词", "绝句", "唐诗"])
+    ):
+        detail_instruction += (
+            "\n请仅输出符合要求的诗词正文，不要添加标题、备注、解释或其他白话内容，更不要出现提示语。"
+        )
+    prompt = f"{base_context}\n{detail_instruction}"
+    print(f"生成评论提示词类型: {comment_type}，提示内容: {prompt}...")
+    return prompt
+
 
 
 def image_to_base64(path):
@@ -452,7 +560,15 @@ def get_comment(request):  # 生成短视频评论
     data = json.loads(request.body)  # 读取JSON体
     number = data.get('count')  # 评论字数目标
     shared_text = data.get('url', '')  # 分享文本（可能包含链接）
-    comment_type_labels = ",".join(data.get("selecttext_list", []))  # 评论类型标签
+    comment_type = normalize_comment_type(
+        data.get("selecttext_list")
+    ) or normalize_comment_type(
+        data.get("comment_type")
+    ) or normalize_comment_type(
+        data.get("prompt_type")
+    ) or normalize_comment_type(
+        data.get("selecttext")
+    )
     video_url = extract_url(shared_text)  # 提取视频URL
     if not video_url:  # 无URL
         return JsonResponse({"result": False}, status=500)  # 返回失败
@@ -490,7 +606,7 @@ def get_comment(request):  # 生成短视频评论
             print("=" * 60)
             print("步骤3: 构造提示词并获取封面图")
             print("=" * 60)
-            prompt = build_comment_prompt(audio_text, video_title, number, comment_type_labels)  # 构造提示词
+            prompt = build_comment_prompt(audio_text, video_title, number, comment_type)  # 构造提示词
             
             base64_image = None
             if cover_image_url and cover_image_url != "None":
@@ -506,14 +622,17 @@ def get_comment(request):  # 生成短视频评论
             
             # 根据是否有封面图选择模型
             if base64_image:
-                print("使用VLM图文模型")
-                response_data = gen_image_text_stream(base64_image, prompt)
+                # print("使用VLM图文模型")
+                # response_data = gen_image_text_stream(base64_image, prompt)
+                print("有封面图但是直接使用文本模式")
+                # 修改提示词去掉图片相关内容
+                prompt_text = prompt
+                response_data = gen_text_stream(prompt_text)
             else:
                 print("无封面图，使用纯文本模型")
                 # 修改提示词去掉图片相关内容
-                prompt_text = prompt.replace("视频封面图片和", "").replace("结合发送给你的", "")
+                prompt_text = prompt
                 response_data = gen_text_stream(prompt_text)
-            
             if not response_data:
                 return JsonResponse({"result": False, "msg": "AI生成失败"}, status=500)
             
@@ -536,10 +655,7 @@ def get_comment(request):  # 生成短视频评论
         print("没有视频直链，仅用封面与标题生成评论")
         try:
             # 构造提示词
-            prompt = (  # 构造提示词
-                f"视频标题：{video_title};请结合视频标题模拟真人用{number}个字左右评论这个短视频，"
-                f"要求评论必须要符合{comment_type_labels} 这几个类型要求，但是评论内容尽量不出现{comment_type_labels}这几个字"
-            )
+            prompt = build_comment_prompt("", video_title, number, comment_type)
             
             # 获取封面图
             base64_image = None
@@ -547,11 +663,12 @@ def get_comment(request):  # 生成短视频评论
                 base64_image = fetch_image_b64(cover_image_url)
                 if base64_image:
                     print(f"封面图获取成功，大小: {len(base64_image)} bytes")
-            
+            print(f"最终提示词{prompt}")
             # 根据是否有封面图选择模型
             if base64_image:
-                print("使用VLM图文模型")
-                response_data = gen_image_text_stream(base64_image, prompt)
+                print("有封面图，使用纯文本模型")
+                response_data = gen_text_stream(prompt)
+                # response_data = gen_image_text_stream(base64_image, prompt)
             else:
                 print("无封面图，使用纯文本模型")
                 response_data = gen_text_stream(prompt)
@@ -678,32 +795,32 @@ def get_text(request):
     return StreamingHttpResponse(stream_chunks(response), content_type='text/plain')
 
 
-@csrf_exempt
-def get_code(request):
-    if request.method != 'POST':
-        return JsonResponse({"data": False})
-    default_types = [
-        '高情商','同意','幽默','支持','提问','感动','暖心','鼓励','加油','反对','质疑','批评',
-        '惊讶','不可思议','羡慕','向往','求解答','召唤','讨论','标记','收藏','干货','有用',
-        '求教程','求链接','分享经验','补充信息','热词玩梗','简短有力','神评论','表达喜爱','催更',
-        '夸赞博主','价格咨询','产品细节追问','真人测评诉求','竞品对比','售后担忧','场景化需求',
-        '追问原理求资料','周星驰式','梁朝伟式','预言','赞美','董宇辉式小作文','七言绝句',
-        '散文诗歌','唐诗','宋词','歌词'
-    ]
-    data = json.loads(request.body)
-    code = data.get('code')
-    with connection.cursor() as cursor:
-        cursor.execute('select * from user where code = %s', (code,))
-        isexist = cursor.fetchall()
-        if isexist:
-            return JsonResponse({"data": False})
-        cursor.execute('insert into user(code) values (%s)', (code,))
-        for item in default_types:
-            cursor.execute(
-                'insert into comment_type(type_name,isset,ischeck,user_code) values (%s,1,0,%s)',
-                (item, code)
-            )
-    return JsonResponse({"data": True})
+# @csrf_exempt
+# def get_code(request):
+#     if request.method != 'POST':
+#         return JsonResponse({"data": False})
+#     default_types = [
+#         '高情商','同意','幽默','支持','提问','感动','暖心','鼓励','加油','反对','质疑','批评',
+#         '惊讶','不可思议','羡慕','向往','求解答','召唤','讨论','标记','收藏','干货','有用',
+#         '求教程','求链接','分享经验','补充信息','热词玩梗','简短有力','神评论','表达喜爱','催更',
+#         '夸赞博主','价格咨询','产品细节追问','真人测评诉求','竞品对比','售后担忧','场景化需求',
+#         '追问原理求资料','周星驰式','梁朝伟式','预言','赞美','董宇辉式小作文','七言绝句',
+#         '散文诗歌','唐诗','宋词','歌词'
+#     ]
+#     data = json.loads(request.body)
+#     code = data.get('code')
+#     with connection.cursor() as cursor:
+#         cursor.execute('select * from user where code = %s', (code,))
+#         isexist = cursor.fetchall()
+#         if isexist:
+#             return JsonResponse({"data": False})
+#         cursor.execute('insert into user(code) values (%s)', (code,))
+#         for item in default_types:
+#             cursor.execute(
+#                 'insert into comment_type(type_name,isset,ischeck,user_code) values (%s,1,0,%s)',
+#                 (item, code)
+#             )
+#     return JsonResponse({"data": True})
 
 
 @csrf_exempt
